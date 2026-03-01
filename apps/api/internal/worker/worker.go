@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"math/rand"
 	"os"
 	"sync"
 	"time"
 
+	"github.com/dylangeraci/flowforge/internal/model"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/oklog/ulid/v2"
 	"github.com/redis/go-redis/v9"
@@ -23,21 +25,25 @@ func newULID() string {
 }
 
 type Pool struct {
-	db           *pgxpool.Pool
-	rdb          *redis.Client
-	workerCount  int
-	consumerName string
-	wg           sync.WaitGroup
-	cancel       context.CancelFunc
+	db                        *pgxpool.Pool
+	rdb                       *redis.Client
+	workerCount               int
+	consumerName              string
+	recoveryIntervalSecs      int
+	recoveryIdleThresholdSecs int
+	wg                        sync.WaitGroup
+	cancel                    context.CancelFunc
 }
 
-func NewPool(db *pgxpool.Pool, rdb *redis.Client, workerCount int) *Pool {
+func NewPool(db *pgxpool.Pool, rdb *redis.Client, workerCount, recoveryIntervalSecs, recoveryIdleThresholdSecs int) *Pool {
 	hostname, _ := os.Hostname()
 	return &Pool{
-		db:           db,
-		rdb:          rdb,
-		workerCount:  workerCount,
-		consumerName: fmt.Sprintf("worker-%s-%d", hostname, os.Getpid()),
+		db:                        db,
+		rdb:                       rdb,
+		workerCount:               workerCount,
+		consumerName:              fmt.Sprintf("worker-%s-%d", hostname, os.Getpid()),
+		recoveryIntervalSecs:      recoveryIntervalSecs,
+		recoveryIdleThresholdSecs: recoveryIdleThresholdSecs,
 	}
 }
 
@@ -55,7 +61,12 @@ func (p *Pool) Start(ctx context.Context) error {
 		go p.consume(ctx, i)
 	}
 
-	log.Printf("Worker pool started: %d workers, consumer=%s", p.workerCount, p.consumerName)
+	// Launch crash recovery goroutine
+	p.wg.Add(1)
+	go p.recoverOrphaned(ctx)
+
+	log.Printf("Worker pool started: %d workers, consumer=%s, recovery every %ds",
+		p.workerCount, p.consumerName, p.recoveryIntervalSecs)
 	return nil
 }
 
@@ -105,9 +116,15 @@ func (p *Pool) processMessage(ctx context.Context, msg redis.XMessage) {
 	runID, _ := msg.Values["run_id"].(string)
 	stepIndexStr, _ := msg.Values["step_index"].(string)
 	attemptID, _ := msg.Values["attempt_id"].(string)
+	attemptNumberStr, _ := msg.Values["attempt_number"].(string)
 
 	var stepIndex int
 	fmt.Sscanf(stepIndexStr, "%d", &stepIndex)
+
+	attemptNumber := 1
+	if attemptNumberStr != "" {
+		fmt.Sscanf(attemptNumberStr, "%d", &attemptNumber)
+	}
 
 	// Fetch run status — skip if not pending/running
 	var runStatus string
@@ -181,8 +198,8 @@ func (p *Pool) processMessage(ctx context.Context, msg redis.XMessage) {
 	// Insert step execution
 	_, err = p.db.Exec(ctx,
 		`INSERT INTO step_executions (id, run_id, step_index, attempt_id, attempt_number, action, status, input, output, error_message, duration_ms, started_at, completed_at)
-		 VALUES ($1, $2, $3, $4, 1, $5, $6, $7, $8, $9, $10, $11, $12)`,
-		stepExecID, runID, stepIndex, attemptID, action, status, stepConfig, output, errMsg, durationMs, startedAt, completedAt,
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+		stepExecID, runID, stepIndex, attemptID, attemptNumber, action, status, stepConfig, output, errMsg, durationMs, startedAt, completedAt,
 	)
 	if err != nil {
 		log.Printf("Worker: failed to insert step execution: %v", err)
@@ -192,7 +209,7 @@ func (p *Pool) processMessage(ctx context.Context, msg redis.XMessage) {
 	p.ack(ctx, msg.ID)
 
 	if execErr != nil {
-		p.markRunFailed(ctx, runID, execErr.Error())
+		p.handleStepFailure(ctx, workflowID, runID, stepIndex, attemptNumber, execErr.Error())
 		return
 	}
 
@@ -218,9 +235,10 @@ func (p *Pool) processMessage(ctx context.Context, msg redis.XMessage) {
 		p.rdb.XAdd(ctx, &redis.XAddArgs{
 			Stream: streamName,
 			Values: map[string]interface{}{
-				"run_id":     runID,
-				"step_index": fmt.Sprintf("%d", nextStep),
-				"attempt_id": nextAttemptID,
+				"run_id":         runID,
+				"step_index":     fmt.Sprintf("%d", nextStep),
+				"attempt_id":     nextAttemptID,
+				"attempt_number": "1",
 			},
 		})
 	} else {
@@ -232,6 +250,139 @@ func (p *Pool) processMessage(ctx context.Context, msg redis.XMessage) {
 		)
 		if err != nil {
 			log.Printf("Worker: failed to mark run %s completed: %v", runID, err)
+		}
+	}
+}
+
+func (p *Pool) handleStepFailure(ctx context.Context, workflowID, runID string, stepIndex, attemptNumber int, errMsg string) {
+	// Fetch retry policy from workflow
+	var retryPolicyRaw json.RawMessage
+	err := p.db.QueryRow(ctx,
+		`SELECT retry_policy FROM workflows WHERE id = $1`, workflowID,
+	).Scan(&retryPolicyRaw)
+	if err != nil {
+		log.Printf("Worker: failed to fetch retry policy for workflow %s: %v", workflowID, err)
+		p.markRunFailed(ctx, runID, errMsg)
+		return
+	}
+
+	var policy model.RetryPolicy
+	if retryPolicyRaw != nil {
+		if err := json.Unmarshal(retryPolicyRaw, &policy); err != nil {
+			log.Printf("Worker: failed to parse retry policy: %v", err)
+			p.markRunFailed(ctx, runID, errMsg)
+			return
+		}
+	}
+	policy = policy.WithDefaults()
+
+	// attempt 1 = initial try, retries are attempts 2..maxRetries+1
+	if attemptNumber >= policy.MaxRetries+1 {
+		p.markRunFailed(ctx, runID, fmt.Sprintf("step %d failed after %d attempts: %s", stepIndex, attemptNumber, errMsg))
+		return
+	}
+
+	// Compute exponential backoff delay
+	delay := float64(policy.InitialDelayMs) * math.Pow(policy.Multiplier, float64(attemptNumber-1))
+	if delay > float64(policy.MaxDelayMs) {
+		delay = float64(policy.MaxDelayMs)
+	}
+
+	log.Printf("Worker: step %d attempt %d failed for run %s, retrying in %dms (attempt %d)",
+		stepIndex, attemptNumber, runID, int(delay), attemptNumber+1)
+
+	// Context-aware sleep
+	select {
+	case <-time.After(time.Duration(delay) * time.Millisecond):
+	case <-ctx.Done():
+		return
+	}
+
+	// XADD retry with incremented attempt number
+	nextAttemptID := newULID()
+	p.rdb.XAdd(ctx, &redis.XAddArgs{
+		Stream: streamName,
+		Values: map[string]interface{}{
+			"run_id":         runID,
+			"step_index":     fmt.Sprintf("%d", stepIndex),
+			"attempt_id":     nextAttemptID,
+			"attempt_number": fmt.Sprintf("%d", attemptNumber+1),
+		},
+	})
+}
+
+func (p *Pool) recoverOrphaned(ctx context.Context) {
+	defer p.wg.Done()
+
+	ticker := time.NewTicker(time.Duration(p.recoveryIntervalSecs) * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			p.doRecovery(ctx)
+		}
+	}
+}
+
+func (p *Pool) doRecovery(ctx context.Context) {
+	pending, err := p.rdb.XPendingExt(ctx, &redis.XPendingExtArgs{
+		Stream: streamName,
+		Group:  groupName,
+		Start:  "-",
+		End:    "+",
+		Count:  100,
+	}).Result()
+	if err != nil {
+		log.Printf("Recovery: XPENDING error: %v", err)
+		return
+	}
+
+	idleThreshold := time.Duration(p.recoveryIdleThresholdSecs) * time.Second
+
+	for _, msg := range pending {
+		if msg.Idle < idleThreshold {
+			continue
+		}
+
+		log.Printf("Recovery: claiming orphaned message %s (idle %s)", msg.ID, msg.Idle)
+
+		claimed, err := p.rdb.XClaim(ctx, &redis.XClaimArgs{
+			Stream:   streamName,
+			Group:    groupName,
+			Consumer: p.consumerName,
+			MinIdle:  idleThreshold,
+			Messages: []string{msg.ID},
+		}).Result()
+		if err != nil {
+			log.Printf("Recovery: XCLAIM error for %s: %v", msg.ID, err)
+			continue
+		}
+
+		for _, claimedMsg := range claimed {
+			attemptID, _ := claimedMsg.Values["attempt_id"].(string)
+
+			// Idempotency check: see if this attempt was already processed
+			var exists bool
+			err := p.db.QueryRow(ctx,
+				`SELECT EXISTS(SELECT 1 FROM step_executions WHERE attempt_id = $1)`, attemptID,
+			).Scan(&exists)
+			if err != nil {
+				log.Printf("Recovery: idempotency check error for attempt %s: %v", attemptID, err)
+				continue
+			}
+
+			if exists {
+				// Already processed — just ACK
+				p.ack(ctx, claimedMsg.ID)
+				log.Printf("Recovery: message %s already processed (attempt %s), ACKed", claimedMsg.ID, attemptID)
+			} else {
+				// Reprocess
+				log.Printf("Recovery: reprocessing message %s", claimedMsg.ID)
+				p.processMessage(ctx, claimedMsg)
+			}
 		}
 	}
 }

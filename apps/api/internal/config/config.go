@@ -6,18 +6,22 @@ import (
 )
 
 type Config struct {
-	DatabaseURL string
-	RedisURL    string
-	Port        string
-	WorkerCount int
+	DatabaseURL               string
+	RedisURL                  string
+	Port                      string
+	WorkerCount               int
+	RecoveryIntervalSecs      int
+	RecoveryIdleThresholdSecs int
 }
 
 func Load() Config {
 	return Config{
-		DatabaseURL: getEnv("DATABASE_URL", "postgres://flowforge:flowforge@localhost:5432/flowforge?sslmode=disable"),
-		RedisURL:    getEnv("REDIS_URL", "redis://localhost:6379"),
-		Port:        getEnv("PORT", "8080"),
-		WorkerCount: getEnvInt("WORKER_COUNT", 5),
+		DatabaseURL:               getEnv("DATABASE_URL", "postgres://flowforge:flowforge@localhost:5432/flowforge?sslmode=disable"),
+		RedisURL:                  getEnv("REDIS_URL", "redis://localhost:6379"),
+		Port:                      getEnv("PORT", "8080"),
+		WorkerCount:               getEnvInt("WORKER_COUNT", 5),
+		RecoveryIntervalSecs:      getEnvInt("RECOVERY_INTERVAL_SECS", 30),
+		RecoveryIdleThresholdSecs: getEnvInt("RECOVERY_IDLE_THRESHOLD_SECS", 60),
 	}
 }
 

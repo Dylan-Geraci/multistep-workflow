@@ -55,7 +55,7 @@ func main() {
 	log.Println("Connected to Redis")
 
 	// Start worker pool
-	wp := worker.NewPool(pool, rdb, cfg.WorkerCount)
+	wp := worker.NewPool(pool, rdb, cfg.WorkerCount, cfg.RecoveryIntervalSecs, cfg.RecoveryIdleThresholdSecs)
 	if err := wp.Start(ctx); err != nil {
 		log.Fatalf("Failed to start worker pool: %v", err)
 	}

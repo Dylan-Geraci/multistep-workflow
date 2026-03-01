@@ -79,9 +79,10 @@ func (h *RunHandler) Create(w http.ResponseWriter, r *http.Request) {
 	err = h.rdb.XAdd(r.Context(), &redis.XAddArgs{
 		Stream: streamName,
 		Values: map[string]interface{}{
-			"run_id":     runID,
-			"step_index": "0",
-			"attempt_id": attemptID,
+			"run_id":         runID,
+			"step_index":     "0",
+			"attempt_id":     attemptID,
+			"attempt_number": "1",
 		},
 	}).Err()
 	if err != nil {

@@ -40,7 +40,8 @@ type CreateRunRequest struct {
 }
 
 type StepMessage struct {
-	RunID     string `json:"run_id"`
-	StepIndex int    `json:"step_index"`
-	AttemptID string `json:"attempt_id"`
+	RunID         string `json:"run_id"`
+	StepIndex     int    `json:"step_index"`
+	AttemptID     string `json:"attempt_id"`
+	AttemptNumber int    `json:"attempt_number"`
 }
