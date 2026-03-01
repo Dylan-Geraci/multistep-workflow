@@ -18,10 +18,15 @@ func New(db *pgxpool.Pool, rdb *redis.Client) *chi.Mux {
 	r.Get("/health", health.Check)
 
 	workflows := handler.NewWorkflowHandler(db)
+	runs := handler.NewRunHandler(db, rdb)
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Post("/workflows", workflows.Create)
 		r.Get("/workflows", workflows.List)
 		r.Get("/workflows/{id}", workflows.GetByID)
+
+		r.Post("/workflows/{id}/runs", runs.Create)
+		r.Get("/workflows/{id}/runs", runs.List)
+		r.Get("/runs/{id}", runs.GetByID)
 	})
 
 	return r

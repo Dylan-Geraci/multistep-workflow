@@ -13,6 +13,7 @@ import (
 	"github.com/dylangeraci/flowforge/internal/config"
 	"github.com/dylangeraci/flowforge/internal/db"
 	"github.com/dylangeraci/flowforge/internal/router"
+	"github.com/dylangeraci/flowforge/internal/worker"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 )
@@ -53,6 +54,12 @@ func main() {
 	}
 	log.Println("Connected to Redis")
 
+	// Start worker pool
+	wp := worker.NewPool(pool, rdb, cfg.WorkerCount)
+	if err := wp.Start(ctx); err != nil {
+		log.Fatalf("Failed to start worker pool: %v", err)
+	}
+
 	// Setup router
 	r := router.New(pool, rdb)
 
@@ -77,6 +84,9 @@ func main() {
 
 	<-done
 	log.Println("Shutting down...")
+
+	// Stop worker pool first
+	wp.Stop()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
