@@ -61,7 +61,7 @@ func main() {
 	}
 
 	// Setup router
-	r := router.New(pool, rdb)
+	r := router.New(pool, rdb, cfg)
 
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%s", cfg.Port),

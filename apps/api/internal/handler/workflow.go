@@ -9,13 +9,12 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/dylangeraci/flowforge/internal/middleware"
 	"github.com/dylangeraci/flowforge/internal/model"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/oklog/ulid/v2"
 )
-
-const defaultUserID = "01JDEFAULT000000000000000"
 
 type WorkflowHandler struct {
 	db *pgxpool.Pool
@@ -30,6 +29,8 @@ func newULID() string {
 }
 
 func (h *WorkflowHandler) Create(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.UserIDFromContext(r.Context())
+
 	var req model.CreateWorkflowRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		model.WriteError(w, http.StatusBadRequest, "INVALID_JSON", "Request body is not valid JSON")
@@ -70,7 +71,7 @@ func (h *WorkflowHandler) Create(w http.ResponseWriter, r *http.Request) {
 	_, err = tx.Exec(r.Context(),
 		`INSERT INTO workflows (id, user_id, name, description, retry_policy, created_at, updated_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		workflowID, defaultUserID, req.Name, req.Description, retryPolicy, now, now,
+		workflowID, userID, req.Name, req.Description, retryPolicy, now, now,
 	)
 	if err != nil {
 		model.WriteError(w, http.StatusInternalServerError, "INTERNAL", "Failed to create workflow")
@@ -109,7 +110,7 @@ func (h *WorkflowHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	wf := model.Workflow{
 		ID:          workflowID,
-		UserID:      defaultUserID,
+		UserID:      userID,
 		Name:        req.Name,
 		Description: req.Description,
 		RetryPolicy: retryPolicy,
@@ -122,6 +123,8 @@ func (h *WorkflowHandler) Create(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *WorkflowHandler) List(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.UserIDFromContext(r.Context())
+
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	if limit <= 0 || limit > 100 {
 		limit = 20
@@ -135,7 +138,7 @@ func (h *WorkflowHandler) List(w http.ResponseWriter, r *http.Request) {
 		`SELECT id, user_id, name, description, retry_policy, is_active, created_at, updated_at
 		 FROM workflows WHERE user_id = $1
 		 ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
-		defaultUserID, limit, offset,
+		userID, limit, offset,
 	)
 	if err != nil {
 		model.WriteError(w, http.StatusInternalServerError, "INTERNAL", "Failed to list workflows")
@@ -154,7 +157,7 @@ func (h *WorkflowHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var total int
-	h.db.QueryRow(r.Context(), `SELECT COUNT(*) FROM workflows WHERE user_id = $1`, defaultUserID).Scan(&total)
+	h.db.QueryRow(r.Context(), `SELECT COUNT(*) FROM workflows WHERE user_id = $1`, userID).Scan(&total)
 
 	model.WriteJSON(w, http.StatusOK, map[string]interface{}{
 		"data":   workflows,
@@ -165,13 +168,14 @@ func (h *WorkflowHandler) List(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *WorkflowHandler) GetByID(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.UserIDFromContext(r.Context())
 	id := chi.URLParam(r, "id")
 
 	var wf model.Workflow
 	err := h.db.QueryRow(r.Context(),
 		`SELECT id, user_id, name, description, retry_policy, is_active, created_at, updated_at
 		 FROM workflows WHERE id = $1 AND user_id = $2`,
-		id, defaultUserID,
+		id, userID,
 	).Scan(&wf.ID, &wf.UserID, &wf.Name, &wf.Description, &wf.RetryPolicy, &wf.IsActive, &wf.CreatedAt, &wf.UpdatedAt)
 	if err != nil {
 		model.WriteError(w, http.StatusNotFound, "NOT_FOUND", "Workflow not found")

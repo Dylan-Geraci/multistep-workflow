@@ -37,6 +37,7 @@ services:
       DATABASE_URL: postgres://flowforge:flowforge@postgres:5432/flowforge?sslmode=disable
       REDIS_URL: redis://redis:6379
       PORT: "8080"
+      JWT_SECRET: "super-secret-change-in-prod"
     depends_on:
       postgres:
         condition: service_healthy

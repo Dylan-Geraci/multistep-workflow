@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/dylangeraci/flowforge/internal/middleware"
 	"github.com/dylangeraci/flowforge/internal/model"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -25,13 +26,14 @@ func NewRunHandler(db *pgxpool.Pool, rdb *redis.Client) *RunHandler {
 }
 
 func (h *RunHandler) Create(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.UserIDFromContext(r.Context())
 	workflowID := chi.URLParam(r, "id")
 
 	// Validate workflow exists and belongs to user
 	var wfID string
 	err := h.db.QueryRow(r.Context(),
 		`SELECT id FROM workflows WHERE id = $1 AND user_id = $2`,
-		workflowID, defaultUserID,
+		workflowID, userID,
 	).Scan(&wfID)
 	if err != nil {
 		model.WriteError(w, http.StatusNotFound, "NOT_FOUND", "Workflow not found")
@@ -67,7 +69,7 @@ func (h *RunHandler) Create(w http.ResponseWriter, r *http.Request) {
 	_, err = h.db.Exec(r.Context(),
 		`INSERT INTO workflow_runs (id, workflow_id, user_id, status, context, current_step, created_at)
 		 VALUES ($1, $2, $3, 'pending', $4, 0, $5)`,
-		runID, workflowID, defaultUserID, runContext, now,
+		runID, workflowID, userID, runContext, now,
 	)
 	if err != nil {
 		model.WriteError(w, http.StatusInternalServerError, "INTERNAL", "Failed to create run")
@@ -93,7 +95,7 @@ func (h *RunHandler) Create(w http.ResponseWriter, r *http.Request) {
 	run := model.Run{
 		ID:          runID,
 		WorkflowID:  workflowID,
-		UserID:      defaultUserID,
+		UserID:      userID,
 		Status:      "pending",
 		Context:     runContext,
 		CurrentStep: 0,
@@ -103,13 +105,14 @@ func (h *RunHandler) Create(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *RunHandler) List(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.UserIDFromContext(r.Context())
 	workflowID := chi.URLParam(r, "id")
 
 	// Validate workflow exists
 	var wfID string
 	err := h.db.QueryRow(r.Context(),
 		`SELECT id FROM workflows WHERE id = $1 AND user_id = $2`,
-		workflowID, defaultUserID,
+		workflowID, userID,
 	).Scan(&wfID)
 	if err != nil {
 		model.WriteError(w, http.StatusNotFound, "NOT_FOUND", "Workflow not found")
@@ -129,7 +132,7 @@ func (h *RunHandler) List(w http.ResponseWriter, r *http.Request) {
 		`SELECT id, workflow_id, user_id, status, context, current_step, error_message, started_at, completed_at, created_at
 		 FROM workflow_runs WHERE workflow_id = $1 AND user_id = $2
 		 ORDER BY created_at DESC LIMIT $3 OFFSET $4`,
-		workflowID, defaultUserID, limit, offset,
+		workflowID, userID, limit, offset,
 	)
 	if err != nil {
 		model.WriteError(w, http.StatusInternalServerError, "INTERNAL", "Failed to list runs")
@@ -150,7 +153,7 @@ func (h *RunHandler) List(w http.ResponseWriter, r *http.Request) {
 	var total int
 	h.db.QueryRow(r.Context(),
 		`SELECT COUNT(*) FROM workflow_runs WHERE workflow_id = $1 AND user_id = $2`,
-		workflowID, defaultUserID,
+		workflowID, userID,
 	).Scan(&total)
 
 	model.WriteJSON(w, http.StatusOK, map[string]interface{}{
@@ -162,13 +165,14 @@ func (h *RunHandler) List(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *RunHandler) GetByID(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.UserIDFromContext(r.Context())
 	runID := chi.URLParam(r, "id")
 
 	var run model.Run
 	err := h.db.QueryRow(r.Context(),
 		`SELECT id, workflow_id, user_id, status, context, current_step, error_message, started_at, completed_at, created_at
 		 FROM workflow_runs WHERE id = $1 AND user_id = $2`,
-		runID, defaultUserID,
+		runID, userID,
 	).Scan(&run.ID, &run.WorkflowID, &run.UserID, &run.Status, &run.Context, &run.CurrentStep, &run.ErrorMessage, &run.StartedAt, &run.CompletedAt, &run.CreatedAt)
 	if err != nil {
 		model.WriteError(w, http.StatusNotFound, "NOT_FOUND", "Run not found")
