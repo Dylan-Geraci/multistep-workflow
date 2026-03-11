@@ -16,8 +16,13 @@ func RequireAuth(jwtSecret string) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			header := r.Header.Get("Authorization")
 			if header == "" {
-				model.WriteError(w, http.StatusUnauthorized, "UNAUTHORIZED", "Missing authorization header")
-				return
+				// Fall back to query param for WebSocket connections (browser WS API can't set headers)
+				if token := r.URL.Query().Get("token"); token != "" {
+					header = "Bearer " + token
+				} else {
+					model.WriteError(w, http.StatusUnauthorized, "UNAUTHORIZED", "Missing authorization header")
+					return
+				}
 			}
 
 			parts := strings.SplitN(header, " ", 2)

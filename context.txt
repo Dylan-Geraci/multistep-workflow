@@ -1,0 +1,40 @@
+FlowForge — Future Work
+========================
+
+Backend Enhancements
+--------------------
+- More step actions: webhook, conditional (if/else branching), parallel execution, loop/iterate
+- Scheduled workflows: cron-based triggers, one-time delayed execution
+- Webhook triggers: inbound HTTP endpoints that auto-start workflow runs
+- Rate limiting: per-user API rate limits (token bucket or sliding window)
+- API versioning: OpenAPI/Swagger spec generation for /api/v1
+
+Observability & Operations
+--------------------------
+- Structured logging: replace log.Printf with slog or zerolog, JSON output
+- Metrics: Prometheus /metrics endpoint (run counts, step durations, error rates, queue depth)
+- Tracing: OpenTelemetry spans across API → Redis → Worker
+- Alerting: define SLOs for run completion time, failure rate
+
+Security & Auth
+---------------
+- API keys: allow machine-to-machine auth alongside JWT
+- RBAC: roles (admin, editor, viewer) with per-workflow permissions
+- Audit log: track who created/modified/deleted workflows and runs
+
+Infrastructure
+--------------
+- Horizontal scaling: multiple API instances behind load balancer
+- Worker autoscaling: scale worker count based on queue depth
+- Database connection pooling: PgBouncer in front of PostgreSQL
+- CI/CD: GitHub Actions pipeline (lint, test, build Docker image, deploy)
+- Helm chart or Docker Compose production config
+
+Frontend (next up)
+------------------
+- Tech: React + TypeScript + Vite in apps/web/
+- Auth pages: login, register
+- Dashboard: list workflows, recent runs, status overview
+- Workflow builder: create/edit workflows with step configuration
+- Run viewer: real-time step progress via WebSocket, logs, retry info
+- Settings: user profile, API key management
