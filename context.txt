@@ -1,8 +1,44 @@
-FlowForge — Future Work
-========================
+FlowForge — Project Status & Future Work
+==========================================
+
+Current Status
+--------------
+Backend: DONE
+  - Go API with Chi router (apps/api/)
+  - PostgreSQL for state, Redis Streams for job queue, Redis pub/sub for real-time
+  - JWT auth (login, register, refresh tokens)
+  - Workflow CRUD API (/api/v1/workflows)
+  - Run execution with worker pool (/api/v1/runs)
+  - WebSocket hub for live run/step events
+  - Step actions: log, delay, http_call, transform
+  - Retry policy support with exponential backoff
+  - Docker Compose setup (infra/docker/)
+
+Frontend: DONE (functional, needs polish)
+  - React 19 + TypeScript + Vite + Tailwind CSS 4 (apps/web/)
+  - API client with automatic token refresh (src/api/)
+  - Auth context + protected routes (src/hooks/useAuth.ts)
+  - WebSocket hook for live run updates (src/hooks/useWebSocket.ts)
+  - Reusable components: Layout, StepBuilder, StepProgress, RunStatusBadge, Pagination
+  - Pages: Login, Register, Dashboard, Workflow Create/Edit/Detail, Run Detail
+  - Vite proxy config routes /api, /auth, /health to backend
+
+Next Steps
+----------
+1. Test full end-to-end flow (register → create workflow → run → view progress)
+2. Fix any integration bugs
+3. UI/UX polish (styling, responsiveness, loading states, error handling)
+
+Running Locally
+---------------
+Terminal 1: cd infra/docker && docker compose up --build
+Terminal 2: cd apps/web && npm run dev
+Open http://localhost:5173
+
+Future Work
+-----------
 
 Backend Enhancements
---------------------
 - More step actions: webhook, conditional (if/else branching), parallel execution, loop/iterate
 - Scheduled workflows: cron-based triggers, one-time delayed execution
 - Webhook triggers: inbound HTTP endpoints that auto-start workflow runs
@@ -10,31 +46,25 @@ Backend Enhancements
 - API versioning: OpenAPI/Swagger spec generation for /api/v1
 
 Observability & Operations
---------------------------
 - Structured logging: replace log.Printf with slog or zerolog, JSON output
 - Metrics: Prometheus /metrics endpoint (run counts, step durations, error rates, queue depth)
 - Tracing: OpenTelemetry spans across API → Redis → Worker
 - Alerting: define SLOs for run completion time, failure rate
 
 Security & Auth
----------------
 - API keys: allow machine-to-machine auth alongside JWT
 - RBAC: roles (admin, editor, viewer) with per-workflow permissions
 - Audit log: track who created/modified/deleted workflows and runs
 
 Infrastructure
---------------
 - Horizontal scaling: multiple API instances behind load balancer
 - Worker autoscaling: scale worker count based on queue depth
 - Database connection pooling: PgBouncer in front of PostgreSQL
 - CI/CD: GitHub Actions pipeline (lint, test, build Docker image, deploy)
 - Helm chart or Docker Compose production config
 
-Frontend (next up)
-------------------
-- Tech: React + TypeScript + Vite in apps/web/
-- Auth pages: login, register
-- Dashboard: list workflows, recent runs, status overview
-- Workflow builder: create/edit workflows with step configuration
-- Run viewer: real-time step progress via WebSocket, logs, retry info
-- Settings: user profile, API key management
+Frontend Improvements
+- UI polish: better styling, animations, responsive design
+- Settings page: user profile, API key management
+- Workflow templates: pre-built workflows to get started quickly
+- Dark mode
