@@ -4,13 +4,14 @@ import (
 	"github.com/dylangeraci/flowforge/internal/config"
 	"github.com/dylangeraci/flowforge/internal/handler"
 	authmw "github.com/dylangeraci/flowforge/internal/middleware"
+	"github.com/dylangeraci/flowforge/internal/ws"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 )
 
-func New(db *pgxpool.Pool, rdb *redis.Client, cfg config.Config) *chi.Mux {
+func New(db *pgxpool.Pool, rdb *redis.Client, cfg config.Config, hub *ws.Hub) *chi.Mux {
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
@@ -32,6 +33,13 @@ func New(db *pgxpool.Pool, rdb *redis.Client, cfg config.Config) *chi.Mux {
 		r.Get("/auth/me", auth.Me)
 	})
 
+	// Protected: WebSocket (auth required but no Content-Type enforcement)
+	wsHandler := handler.NewWSHandler(hub)
+	r.Group(func(r chi.Router) {
+		r.Use(authmw.RequireAuth(cfg.JWTSecret))
+		r.Get("/api/v1/ws", wsHandler.Handle)
+	})
+
 	// Protected: /api/v1/*
 	workflows := handler.NewWorkflowHandler(db)
 	runs := handler.NewRunHandler(db, rdb)
@@ -41,10 +49,13 @@ func New(db *pgxpool.Pool, rdb *redis.Client, cfg config.Config) *chi.Mux {
 		r.Post("/workflows", workflows.Create)
 		r.Get("/workflows", workflows.List)
 		r.Get("/workflows/{id}", workflows.GetByID)
+		r.Put("/workflows/{id}", workflows.Update)
+		r.Delete("/workflows/{id}", workflows.Delete)
 
 		r.Post("/workflows/{id}/runs", runs.Create)
 		r.Get("/workflows/{id}/runs", runs.List)
 		r.Get("/runs/{id}", runs.GetByID)
+		r.Post("/runs/{id}/cancel", runs.Cancel)
 	})
 
 	return r

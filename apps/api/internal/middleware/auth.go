@@ -55,3 +55,8 @@ func UserIDFromContext(ctx context.Context) string {
 	}
 	return ""
 }
+
+// SetUserIDForTest injects a user ID into context for testing.
+func SetUserIDForTest(ctx context.Context, userID string) context.Context {
+	return context.WithValue(ctx, contextKey{}, userID)
+}

@@ -14,6 +14,7 @@ import (
 	"github.com/dylangeraci/flowforge/internal/db"
 	"github.com/dylangeraci/flowforge/internal/router"
 	"github.com/dylangeraci/flowforge/internal/worker"
+	"github.com/dylangeraci/flowforge/internal/ws"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 )
@@ -54,6 +55,10 @@ func main() {
 	}
 	log.Println("Connected to Redis")
 
+	// Start WebSocket hub
+	hub := ws.NewHub(rdb)
+	go hub.Run(ctx)
+
 	// Start worker pool
 	wp := worker.NewPool(pool, rdb, cfg.WorkerCount, cfg.RecoveryIntervalSecs, cfg.RecoveryIdleThresholdSecs)
 	if err := wp.Start(ctx); err != nil {
@@ -61,7 +66,7 @@ func main() {
 	}
 
 	// Setup router
-	r := router.New(pool, rdb, cfg)
+	r := router.New(pool, rdb, cfg, hub)
 
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%s", cfg.Port),

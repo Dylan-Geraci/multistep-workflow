@@ -191,6 +191,150 @@ func (h *WorkflowHandler) GetByID(w http.ResponseWriter, r *http.Request) {
 	model.WriteJSON(w, http.StatusOK, wf)
 }
 
+func (h *WorkflowHandler) Update(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.UserIDFromContext(r.Context())
+	id := chi.URLParam(r, "id")
+
+	var req model.CreateWorkflowRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		model.WriteError(w, http.StatusBadRequest, "INVALID_JSON", "Request body is not valid JSON")
+		return
+	}
+
+	if req.Name == "" {
+		model.WriteError(w, http.StatusBadRequest, "VALIDATION_FAILED", "name is required")
+		return
+	}
+	if len(req.Steps) == 0 {
+		model.WriteError(w, http.StatusBadRequest, "VALIDATION_FAILED", "steps must not be empty")
+		return
+	}
+	for i, s := range req.Steps {
+		if !model.ValidActions[s.Action] {
+			model.WriteError(w, http.StatusBadRequest, "VALIDATION_FAILED",
+				fmt.Sprintf("step %d: invalid action %q, must be one of: http_call, delay, log, transform", i, s.Action))
+			return
+		}
+	}
+
+	// Check no active runs
+	var activeRuns int
+	h.db.QueryRow(r.Context(),
+		`SELECT COUNT(*) FROM workflow_runs WHERE workflow_id = $1 AND status IN ('pending', 'running')`, id,
+	).Scan(&activeRuns)
+	if activeRuns > 0 {
+		model.WriteError(w, http.StatusConflict, "CONFLICT", "Cannot update workflow with active runs")
+		return
+	}
+
+	retryPolicy := req.RetryPolicy
+	if retryPolicy == nil {
+		retryPolicy = json.RawMessage(`{"max_retries":3,"initial_delay_ms":1000,"max_delay_ms":30000,"multiplier":2.0}`)
+	}
+
+	now := time.Now().UTC()
+
+	tx, err := h.db.Begin(r.Context())
+	if err != nil {
+		model.WriteError(w, http.StatusInternalServerError, "INTERNAL", "Failed to begin transaction")
+		return
+	}
+	defer tx.Rollback(r.Context())
+
+	// Verify ownership and update workflow row
+	tag, err := tx.Exec(r.Context(),
+		`UPDATE workflows SET name = $3, description = $4, retry_policy = $5, updated_at = $6
+		 WHERE id = $1 AND user_id = $2`,
+		id, userID, req.Name, req.Description, retryPolicy, now,
+	)
+	if err != nil {
+		model.WriteError(w, http.StatusInternalServerError, "INTERNAL", "Failed to update workflow")
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		model.WriteError(w, http.StatusNotFound, "NOT_FOUND", "Workflow not found")
+		return
+	}
+
+	// Delete old steps
+	_, err = tx.Exec(r.Context(), `DELETE FROM workflow_steps WHERE workflow_id = $1`, id)
+	if err != nil {
+		model.WriteError(w, http.StatusInternalServerError, "INTERNAL", "Failed to delete old steps")
+		return
+	}
+
+	// Insert new steps
+	steps := make([]model.WorkflowStep, len(req.Steps))
+	for i, s := range req.Steps {
+		stepID := newULID()
+		config := s.Config
+		if config == nil {
+			config = json.RawMessage(`{}`)
+		}
+		_, err = tx.Exec(r.Context(),
+			`INSERT INTO workflow_steps (id, workflow_id, step_index, action, config, name)
+			 VALUES ($1, $2, $3, $4, $5, $6)`,
+			stepID, id, i, s.Action, config, s.Name,
+		)
+		if err != nil {
+			model.WriteError(w, http.StatusInternalServerError, "INTERNAL", "Failed to create workflow step")
+			return
+		}
+		steps[i] = model.WorkflowStep{
+			ID:        stepID,
+			StepIndex: i,
+			Action:    s.Action,
+			Config:    config,
+			Name:      s.Name,
+		}
+	}
+
+	if err := tx.Commit(r.Context()); err != nil {
+		model.WriteError(w, http.StatusInternalServerError, "INTERNAL", "Failed to commit transaction")
+		return
+	}
+
+	// Fetch full workflow for response
+	var wf model.Workflow
+	h.db.QueryRow(r.Context(),
+		`SELECT id, user_id, name, description, retry_policy, is_active, created_at, updated_at
+		 FROM workflows WHERE id = $1`,
+		id,
+	).Scan(&wf.ID, &wf.UserID, &wf.Name, &wf.Description, &wf.RetryPolicy, &wf.IsActive, &wf.CreatedAt, &wf.UpdatedAt)
+	wf.Steps = steps
+
+	model.WriteJSON(w, http.StatusOK, wf)
+}
+
+func (h *WorkflowHandler) Delete(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.UserIDFromContext(r.Context())
+	id := chi.URLParam(r, "id")
+
+	// Check no active runs
+	var activeRuns int
+	h.db.QueryRow(r.Context(),
+		`SELECT COUNT(*) FROM workflow_runs WHERE workflow_id = $1 AND status IN ('pending', 'running')`, id,
+	).Scan(&activeRuns)
+	if activeRuns > 0 {
+		model.WriteError(w, http.StatusConflict, "CONFLICT", "Cannot delete workflow with active runs")
+		return
+	}
+
+	tag, err := h.db.Exec(r.Context(),
+		`DELETE FROM workflows WHERE id = $1 AND user_id = $2`, id, userID,
+	)
+	if err != nil {
+		model.WriteError(w, http.StatusInternalServerError, "INTERNAL", "Failed to delete workflow")
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		model.WriteError(w, http.StatusNotFound, "NOT_FOUND", "Workflow not found")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (h *WorkflowHandler) getSteps(ctx context.Context, workflowID string) ([]model.WorkflowStep, error) {
 	rows, err := h.db.Query(ctx,
 		`SELECT id, step_index, action, config, name

@@ -5,13 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"math"
 	"math/rand"
 	"os"
 	"sync"
 	"time"
 
 	"github.com/dylangeraci/flowforge/internal/model"
+	"github.com/dylangeraci/flowforge/internal/ws"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/oklog/ulid/v2"
 	"github.com/redis/go-redis/v9"
@@ -167,6 +167,9 @@ func (p *Pool) processMessage(ctx context.Context, msg redis.XMessage) {
 	if err != nil {
 		log.Printf("Worker: failed to update run %s to running: %v", runID, err)
 	}
+	p.publishEvent(ctx, runID, model.EventRunStatusChanged, map[string]interface{}{
+		"status": "running", "step_index": stepIndex,
+	})
 
 	// Get current run context
 	var runContext json.RawMessage
@@ -179,6 +182,9 @@ func (p *Pool) processMessage(ctx context.Context, msg redis.XMessage) {
 
 	// Execute action
 	startedAt := time.Now().UTC()
+	p.publishEvent(ctx, runID, model.EventStepStarted, map[string]interface{}{
+		"step_index": stepIndex, "action": action, "attempt_number": attemptNumber,
+	})
 	output, execErr := ExecuteAction(ctx, action, stepConfig, runContext)
 	completedAt := time.Now().UTC()
 	durationMs := int(completedAt.Sub(startedAt).Milliseconds())
@@ -209,9 +215,16 @@ func (p *Pool) processMessage(ctx context.Context, msg redis.XMessage) {
 	p.ack(ctx, msg.ID)
 
 	if execErr != nil {
+		p.publishEvent(ctx, runID, model.EventStepFailed, map[string]interface{}{
+			"step_index": stepIndex, "attempt_number": attemptNumber, "error": execErr.Error(), "duration_ms": durationMs,
+		})
 		p.handleStepFailure(ctx, workflowID, runID, stepIndex, attemptNumber, execErr.Error())
 		return
 	}
+
+	p.publishEvent(ctx, runID, model.EventStepCompleted, map[string]interface{}{
+		"step_index": stepIndex, "attempt_number": attemptNumber, "duration_ms": durationMs,
+	})
 
 	// Update run context with step output
 	_, err = p.db.Exec(ctx,
@@ -251,6 +264,9 @@ func (p *Pool) processMessage(ctx context.Context, msg redis.XMessage) {
 		if err != nil {
 			log.Printf("Worker: failed to mark run %s completed: %v", runID, err)
 		}
+		p.publishEvent(ctx, runID, model.EventRunCompleted, map[string]interface{}{
+			"status": "completed",
+		})
 	}
 }
 
@@ -283,18 +299,26 @@ func (p *Pool) handleStepFailure(ctx context.Context, workflowID, runID string, 
 	}
 
 	// Compute exponential backoff delay
-	delay := float64(policy.InitialDelayMs) * math.Pow(policy.Multiplier, float64(attemptNumber-1))
-	if delay > float64(policy.MaxDelayMs) {
-		delay = float64(policy.MaxDelayMs)
-	}
+	delayMs := CalculateBackoffDelay(policy, attemptNumber)
 
 	log.Printf("Worker: step %d attempt %d failed for run %s, retrying in %dms (attempt %d)",
-		stepIndex, attemptNumber, runID, int(delay), attemptNumber+1)
+		stepIndex, attemptNumber, runID, delayMs, attemptNumber+1)
 
 	// Context-aware sleep
 	select {
-	case <-time.After(time.Duration(delay) * time.Millisecond):
+	case <-time.After(time.Duration(delayMs) * time.Millisecond):
 	case <-ctx.Done():
+		return
+	}
+
+	// Re-check run status after backoff — may have been cancelled
+	var currentStatus string
+	if err := p.db.QueryRow(ctx, `SELECT status FROM workflow_runs WHERE id = $1`, runID).Scan(&currentStatus); err != nil {
+		log.Printf("Worker: failed to re-check run status %s: %v", runID, err)
+		return
+	}
+	if currentStatus != "pending" && currentStatus != "running" {
+		log.Printf("Worker: run %s status changed to %s during backoff, skipping retry", runID, currentStatus)
 		return
 	}
 
@@ -396,8 +420,27 @@ func (p *Pool) markRunFailed(ctx context.Context, runID, errMsg string) {
 	if err != nil {
 		log.Printf("Worker: failed to mark run %s as failed: %v", runID, err)
 	}
+	p.publishEvent(ctx, runID, model.EventRunFailed, map[string]interface{}{
+		"status": "failed", "error": errMsg,
+	})
 }
 
 func (p *Pool) ack(ctx context.Context, msgID string) {
 	p.rdb.XAck(ctx, streamName, groupName, msgID)
+}
+
+func (p *Pool) publishEvent(ctx context.Context, runID string, eventType string, data interface{}) {
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		log.Printf("Worker: failed to marshal event data: %v", err)
+		return
+	}
+	event := model.WSEvent{
+		Type:  eventType,
+		RunID: runID,
+		Data:  jsonData,
+	}
+	if err := ws.PublishEvent(ctx, p.rdb, runID, event); err != nil {
+		log.Printf("Worker: failed to publish event: %v", err)
+	}
 }

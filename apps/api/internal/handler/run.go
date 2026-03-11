@@ -164,6 +164,45 @@ func (h *RunHandler) List(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (h *RunHandler) Cancel(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.UserIDFromContext(r.Context())
+	runID := chi.URLParam(r, "id")
+
+	var status string
+	err := h.db.QueryRow(r.Context(),
+		`SELECT status FROM workflow_runs WHERE id = $1 AND user_id = $2`,
+		runID, userID,
+	).Scan(&status)
+	if err != nil {
+		model.WriteError(w, http.StatusNotFound, "NOT_FOUND", "Run not found")
+		return
+	}
+
+	if status != "pending" && status != "running" {
+		model.WriteError(w, http.StatusConflict, "CONFLICT", fmt.Sprintf("Cannot cancel run with status %q", status))
+		return
+	}
+
+	now := time.Now().UTC()
+	_, err = h.db.Exec(r.Context(),
+		`UPDATE workflow_runs SET status = 'cancelled', completed_at = $2 WHERE id = $1`,
+		runID, now,
+	)
+	if err != nil {
+		model.WriteError(w, http.StatusInternalServerError, "INTERNAL", "Failed to cancel run")
+		return
+	}
+
+	var run model.Run
+	h.db.QueryRow(r.Context(),
+		`SELECT id, workflow_id, user_id, status, context, current_step, error_message, started_at, completed_at, created_at
+		 FROM workflow_runs WHERE id = $1`,
+		runID,
+	).Scan(&run.ID, &run.WorkflowID, &run.UserID, &run.Status, &run.Context, &run.CurrentStep, &run.ErrorMessage, &run.StartedAt, &run.CompletedAt, &run.CreatedAt)
+
+	model.WriteJSON(w, http.StatusOK, run)
+}
+
 func (h *RunHandler) GetByID(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.UserIDFromContext(r.Context())
 	runID := chi.URLParam(r, "id")
