@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -12,6 +12,8 @@ import (
 
 	"github.com/dylangeraci/flowforge/internal/config"
 	"github.com/dylangeraci/flowforge/internal/db"
+	"github.com/dylangeraci/flowforge/internal/logging"
+	"github.com/dylangeraci/flowforge/internal/metrics"
 	"github.com/dylangeraci/flowforge/internal/router"
 	"github.com/dylangeraci/flowforge/internal/worker"
 	"github.com/dylangeraci/flowforge/internal/ws"
@@ -22,47 +24,61 @@ import (
 func main() {
 	cfg := config.Load()
 
+	logger := logging.New(cfg.LogLevel)
+	slog.SetDefault(logger)
+
+	metrics.Init()
+
 	ctx := context.Background()
 
 	// Connect to PostgreSQL
 	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
 	if err != nil {
-		log.Fatalf("Unable to connect to database: %v", err)
+		slog.Error("unable to connect to database", "error", err)
+		os.Exit(1)
 	}
 	defer pool.Close()
 
 	if err := pool.Ping(ctx); err != nil {
-		log.Fatalf("Unable to ping database: %v", err)
+		slog.Error("unable to ping database", "error", err)
+		os.Exit(1)
 	}
-	log.Println("Connected to PostgreSQL")
+	slog.Info("connected to PostgreSQL")
 
 	// Run migrations
 	if err := db.RunMigrations(cfg.DatabaseURL); err != nil {
-		log.Fatalf("Failed to run migrations: %v", err)
+		slog.Error("failed to run migrations", "error", err)
+		os.Exit(1)
 	}
-	log.Println("Migrations applied")
+	slog.Info("migrations applied")
 
 	// Connect to Redis
 	opts, err := redis.ParseURL(cfg.RedisURL)
 	if err != nil {
-		log.Fatalf("Invalid REDIS_URL: %v", err)
+		slog.Error("invalid REDIS_URL", "error", err)
+		os.Exit(1)
 	}
 	rdb := redis.NewClient(opts)
 	defer rdb.Close()
 
 	if err := rdb.Ping(ctx).Err(); err != nil {
-		log.Fatalf("Unable to connect to Redis: %v", err)
+		slog.Error("unable to connect to Redis", "error", err)
+		os.Exit(1)
 	}
-	log.Println("Connected to Redis")
+	slog.Info("connected to Redis")
 
 	// Start WebSocket hub
 	hub := ws.NewHub(rdb)
 	go hub.Run(ctx)
 
+	// Start metrics collector
+	go metrics.StartCollector(ctx, pool, rdb)
+
 	// Start worker pool
 	wp := worker.NewPool(pool, rdb, cfg.WorkerCount, cfg.RecoveryIntervalSecs, cfg.RecoveryIdleThresholdSecs)
 	if err := wp.Start(ctx); err != nil {
-		log.Fatalf("Failed to start worker pool: %v", err)
+		slog.Error("failed to start worker pool", "error", err)
+		os.Exit(1)
 	}
 
 	// Setup router
@@ -81,14 +97,15 @@ func main() {
 	signal.Notify(done, os.Interrupt, syscall.SIGTERM)
 
 	go func() {
-		log.Printf("Server starting on :%s", cfg.Port)
+		slog.Info("server starting", "port", cfg.Port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Server failed: %v", err)
+			slog.Error("server failed", "error", err)
+			os.Exit(1)
 		}
 	}()
 
 	<-done
-	log.Println("Shutting down...")
+	slog.Info("shutting down")
 
 	// Stop worker pool first
 	wp.Stop()
@@ -97,7 +114,8 @@ func main() {
 	defer cancel()
 
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Fatalf("Shutdown failed: %v", err)
+		slog.Error("shutdown failed", "error", err)
+		os.Exit(1)
 	}
-	log.Println("Server stopped")
+	slog.Info("server stopped")
 }

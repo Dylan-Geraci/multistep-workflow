@@ -1,0 +1,91 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "Step Execution Duration by Action",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(flowforge_step_execution_duration_seconds_bucket[5m])) by (le, action))",
+          "legendFormat": "p95 {{action}}"
+        },
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(flowforge_step_execution_duration_seconds_bucket[5m])) by (le, action))",
+          "legendFormat": "p50 {{action}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s" }
+      }
+    },
+    {
+      "title": "Step Executions Rate by Action",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum(rate(flowforge_step_executions_total[5m])) by (action, status)",
+          "legendFormat": "{{action}} ({{status}})"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ops" }
+      }
+    },
+    {
+      "title": "Queue Depth",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        { "expr": "flowforge_queue_depth", "legendFormat": "queue depth" }
+      ]
+    },
+    {
+      "title": "Active Workers",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 8 },
+      "targets": [
+        { "expr": "flowforge_worker_active", "legendFormat": "active" }
+      ]
+    },
+    {
+      "title": "Recovery Claims",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 8 },
+      "targets": [
+        { "expr": "rate(flowforge_recovery_claims_total[5m])", "legendFormat": "claims/s" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ops" }
+      }
+    },
+    {
+      "title": "Infrastructure Health",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 12, "x": 0, "y": 16 },
+      "targets": [
+        { "expr": "flowforge_pg_up", "legendFormat": "PostgreSQL" },
+        { "expr": "flowforge_redis_up", "legendFormat": "Redis" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } } }
+          ]
+        }
+      }
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["flowforge", "workers"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "title": "FlowForge Workers",
+  "uid": "flowforge-workers"
+}
