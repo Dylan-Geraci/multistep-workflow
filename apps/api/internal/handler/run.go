@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/dylangeraci/flowforge/internal/metrics"
 	"github.com/dylangeraci/flowforge/internal/middleware"
 	"github.com/dylangeraci/flowforge/internal/model"
 	"github.com/go-chi/chi/v5"
@@ -91,6 +92,8 @@ func (h *RunHandler) Create(w http.ResponseWriter, r *http.Request) {
 		model.WriteError(w, http.StatusInternalServerError, "INTERNAL", "Failed to enqueue step")
 		return
 	}
+
+	metrics.RunsStartedTotal.Inc()
 
 	run := model.Run{
 		ID:          runID,
