@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/dylangeraci/flowforge/internal/metrics"
 	"github.com/dylangeraci/flowforge/internal/middleware"
 	"github.com/dylangeraci/flowforge/internal/model"
 	"github.com/go-chi/chi/v5"
@@ -17,12 +18,13 @@ import (
 const streamName = "flowforge:steps"
 
 type RunHandler struct {
-	db  *pgxpool.Pool
-	rdb *redis.Client
+	db      *pgxpool.Pool
+	rdb     *redis.Client
+	metrics *metrics.Metrics
 }
 
-func NewRunHandler(db *pgxpool.Pool, rdb *redis.Client) *RunHandler {
-	return &RunHandler{db: db, rdb: rdb}
+func NewRunHandler(db *pgxpool.Pool, rdb *redis.Client, m *metrics.Metrics) *RunHandler {
+	return &RunHandler{db: db, rdb: rdb, metrics: m}
 }
 
 func (h *RunHandler) Create(w http.ResponseWriter, r *http.Request) {
@@ -91,6 +93,8 @@ func (h *RunHandler) Create(w http.ResponseWriter, r *http.Request) {
 		model.WriteError(w, http.StatusInternalServerError, "INTERNAL", "Failed to enqueue step")
 		return
 	}
+
+	h.metrics.WorkflowRunsTotal.WithLabelValues("pending").Inc()
 
 	run := model.Run{
 		ID:          runID,

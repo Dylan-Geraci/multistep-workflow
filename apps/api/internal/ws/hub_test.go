@@ -14,7 +14,7 @@ import (
 )
 
 func TestHubClientLifecycle(t *testing.T) {
-	hub := NewHub(nil)
+	hub := NewHub(nil, metrics.New())
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go hub.Run(ctx)
@@ -94,7 +94,7 @@ func TestHubClientLifecycle(t *testing.T) {
 }
 
 func TestHubMessageRouting(t *testing.T) {
-	hub := NewHub(nil)
+	hub := NewHub(nil, metrics.New())
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go hub.Run(ctx)

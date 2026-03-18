@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/dylangeraci/flowforge/internal/metrics"
 	"github.com/dylangeraci/flowforge/internal/testutil"
 	"github.com/go-chi/chi/v5"
 	"github.com/tidwall/gjson"
@@ -20,7 +21,7 @@ func setupRunRouter(t *testing.T) (*chi.Mux, string) {
 	testutil.CreateTestUser(t, db, userID, userID+"@test.com")
 
 	wh := NewWorkflowHandler(db)
-	rh := NewRunHandler(db, rdb)
+	rh := NewRunHandler(db, rdb, metrics.New())
 
 	r := chi.NewRouter()
 	r.Use(func(next http.Handler) http.Handler {

@@ -1,7 +1,7 @@
 package handler
 
 import (
-	"log"
+	"log/slog"
 	"net/http"
 
 	"github.com/dylangeraci/flowforge/internal/middleware"
@@ -30,7 +30,7 @@ func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("WS upgrade error: %v", err)
+		slog.ErrorContext(r.Context(), "ws upgrade error", "error", err)
 		return
 	}
 

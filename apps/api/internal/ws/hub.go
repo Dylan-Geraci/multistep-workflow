@@ -3,10 +3,11 @@ package ws
 import (
 	"context"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
+	"github.com/dylangeraci/flowforge/internal/metrics"
 	"github.com/dylangeraci/flowforge/internal/model"
 	"github.com/gorilla/websocket"
 	"github.com/redis/go-redis/v9"
@@ -35,6 +36,7 @@ type Hub struct {
 	unregister chan *Client
 	subscribe  chan subscribeMsg
 	rdb        *redis.Client
+	metrics    *metrics.Metrics
 	mu         sync.RWMutex
 }
 
@@ -44,7 +46,7 @@ type subscribeMsg struct {
 	unsub  bool
 }
 
-func NewHub(rdb *redis.Client) *Hub {
+func NewHub(rdb *redis.Client, m *metrics.Metrics) *Hub {
 	return &Hub{
 		clients:    make(map[*Client]bool),
 		runSubs:    make(map[string]map[*Client]bool),
@@ -52,6 +54,7 @@ func NewHub(rdb *redis.Client) *Hub {
 		unregister: make(chan *Client),
 		subscribe:  make(chan subscribeMsg, 64),
 		rdb:        rdb,
+		metrics:    m,
 	}
 }
 
@@ -67,6 +70,8 @@ func (h *Hub) Run(ctx context.Context) {
 			h.mu.Lock()
 			h.clients[client] = true
 			h.mu.Unlock()
+			h.metrics.WSConnectionsActive.Inc()
+			slog.Debug("ws client registered", "user_id", client.userID, "active_connections", len(h.clients))
 		case client := <-h.unregister:
 			h.mu.Lock()
 			if _, ok := h.clients[client]; ok {
@@ -83,6 +88,8 @@ func (h *Hub) Run(ctx context.Context) {
 				}
 			}
 			h.mu.Unlock()
+			h.metrics.WSConnectionsActive.Dec()
+			slog.Debug("ws client unregistered", "user_id", client.userID, "active_connections", len(h.clients))
 		case msg := <-h.subscribe:
 			h.mu.Lock()
 			for _, runID := range msg.runIDs {
@@ -175,7 +182,7 @@ func (c *Client) ReadPump() {
 		_, message, err := c.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
-				log.Printf("WS read error: %v", err)
+				slog.Warn("ws read error", "user_id", c.userID, "error", err)
 			}
 			break
 		}

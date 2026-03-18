@@ -4,12 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"math/rand"
 	"os"
 	"sync"
 	"time"
 
+	"github.com/dylangeraci/flowforge/internal/metrics"
 	"github.com/dylangeraci/flowforge/internal/model"
 	"github.com/dylangeraci/flowforge/internal/ws"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -31,11 +32,12 @@ type Pool struct {
 	consumerName              string
 	recoveryIntervalSecs      int
 	recoveryIdleThresholdSecs int
+	metrics                   *metrics.Metrics
 	wg                        sync.WaitGroup
 	cancel                    context.CancelFunc
 }
 
-func NewPool(db *pgxpool.Pool, rdb *redis.Client, workerCount, recoveryIntervalSecs, recoveryIdleThresholdSecs int) *Pool {
+func NewPool(db *pgxpool.Pool, rdb *redis.Client, workerCount, recoveryIntervalSecs, recoveryIdleThresholdSecs int, m *metrics.Metrics) *Pool {
 	hostname, _ := os.Hostname()
 	return &Pool{
 		db:                        db,
@@ -44,6 +46,7 @@ func NewPool(db *pgxpool.Pool, rdb *redis.Client, workerCount, recoveryIntervalS
 		consumerName:              fmt.Sprintf("worker-%s-%d", hostname, os.Getpid()),
 		recoveryIntervalSecs:      recoveryIntervalSecs,
 		recoveryIdleThresholdSecs: recoveryIdleThresholdSecs,
+		metrics:                   m,
 	}
 }
 
@@ -65,8 +68,11 @@ func (p *Pool) Start(ctx context.Context) error {
 	p.wg.Add(1)
 	go p.recoverOrphaned(ctx)
 
-	log.Printf("Worker pool started: %d workers, consumer=%s, recovery every %ds",
-		p.workerCount, p.consumerName, p.recoveryIntervalSecs)
+	slog.Info("worker pool started",
+		"workers", p.workerCount,
+		"consumer", p.consumerName,
+		"recovery_interval_secs", p.recoveryIntervalSecs,
+	)
 	return nil
 }
 
@@ -75,7 +81,7 @@ func (p *Pool) Stop() {
 		p.cancel()
 	}
 	p.wg.Wait()
-	log.Println("Worker pool stopped")
+	slog.Info("worker pool stopped")
 }
 
 func (p *Pool) consume(ctx context.Context, id int) {
@@ -100,7 +106,7 @@ func (p *Pool) consume(ctx context.Context, id int) {
 			if err == redis.Nil || ctx.Err() != nil {
 				continue
 			}
-			log.Printf("Worker %d: XREADGROUP error: %v", id, err)
+			slog.ErrorContext(ctx, "XREADGROUP error", "worker_id", id, "error", err)
 			continue
 		}
 
@@ -126,13 +132,15 @@ func (p *Pool) processMessage(ctx context.Context, msg redis.XMessage) {
 		fmt.Sscanf(attemptNumberStr, "%d", &attemptNumber)
 	}
 
+	log := slog.With("run_id", runID, "step_index", stepIndex, "attempt", attemptNumber)
+
 	// Fetch run status — skip if not pending/running
 	var runStatus string
 	err := p.db.QueryRow(ctx,
 		`SELECT status FROM workflow_runs WHERE id = $1`, runID,
 	).Scan(&runStatus)
 	if err != nil {
-		log.Printf("Worker: failed to fetch run %s: %v", runID, err)
+		log.ErrorContext(ctx, "failed to fetch run status", "error", err)
 		p.ack(ctx, msg.ID)
 		return
 	}
@@ -152,11 +160,13 @@ func (p *Pool) processMessage(ctx context.Context, msg redis.XMessage) {
 		runID, stepIndex,
 	).Scan(&action, &stepConfig, &workflowID)
 	if err != nil {
-		log.Printf("Worker: failed to fetch step definition for run=%s step=%d: %v", runID, stepIndex, err)
+		log.ErrorContext(ctx, "failed to fetch step definition", "error", err)
 		p.markRunFailed(ctx, runID, fmt.Sprintf("step definition not found: %v", err))
 		p.ack(ctx, msg.ID)
 		return
 	}
+
+	log = log.With("action", action)
 
 	// Update run → running
 	_, err = p.db.Exec(ctx,
@@ -165,7 +175,7 @@ func (p *Pool) processMessage(ctx context.Context, msg redis.XMessage) {
 		runID, stepIndex,
 	)
 	if err != nil {
-		log.Printf("Worker: failed to update run %s to running: %v", runID, err)
+		log.ErrorContext(ctx, "failed to update run to running", "error", err)
 	}
 	p.publishEvent(ctx, runID, model.EventRunStatusChanged, map[string]interface{}{
 		"status": "running", "step_index": stepIndex,
@@ -201,6 +211,10 @@ func (p *Pool) processMessage(ctx context.Context, msg redis.XMessage) {
 		output = json.RawMessage(`{}`)
 	}
 
+	// Record step metrics
+	p.metrics.StepExecutionsTotal.WithLabelValues(action, status).Inc()
+	p.metrics.StepExecutionDuration.WithLabelValues(action).Observe(float64(durationMs))
+
 	// Insert step execution
 	_, err = p.db.Exec(ctx,
 		`INSERT INTO step_executions (id, run_id, step_index, attempt_id, attempt_number, action, status, input, output, error_message, duration_ms, started_at, completed_at)
@@ -208,13 +222,14 @@ func (p *Pool) processMessage(ctx context.Context, msg redis.XMessage) {
 		stepExecID, runID, stepIndex, attemptID, attemptNumber, action, status, stepConfig, output, errMsg, durationMs, startedAt, completedAt,
 	)
 	if err != nil {
-		log.Printf("Worker: failed to insert step execution: %v", err)
+		log.ErrorContext(ctx, "failed to insert step execution", "error", err)
 	}
 
 	// ACK the message
 	p.ack(ctx, msg.ID)
 
 	if execErr != nil {
+		log.WarnContext(ctx, "step failed", "error", execErr, "duration_ms", durationMs)
 		p.publishEvent(ctx, runID, model.EventStepFailed, map[string]interface{}{
 			"step_index": stepIndex, "attempt_number": attemptNumber, "error": execErr.Error(), "duration_ms": durationMs,
 		})
@@ -222,6 +237,7 @@ func (p *Pool) processMessage(ctx context.Context, msg redis.XMessage) {
 		return
 	}
 
+	log.InfoContext(ctx, "step completed", "duration_ms", durationMs)
 	p.publishEvent(ctx, runID, model.EventStepCompleted, map[string]interface{}{
 		"step_index": stepIndex, "attempt_number": attemptNumber, "duration_ms": durationMs,
 	})
@@ -232,7 +248,7 @@ func (p *Pool) processMessage(ctx context.Context, msg redis.XMessage) {
 		runID, output,
 	)
 	if err != nil {
-		log.Printf("Worker: failed to update run context: %v", err)
+		log.ErrorContext(ctx, "failed to update run context", "error", err)
 	}
 
 	// Check if there are more steps
@@ -262,8 +278,10 @@ func (p *Pool) processMessage(ctx context.Context, msg redis.XMessage) {
 			runID, now,
 		)
 		if err != nil {
-			log.Printf("Worker: failed to mark run %s completed: %v", runID, err)
+			log.ErrorContext(ctx, "failed to mark run completed", "error", err)
 		}
+		p.metrics.WorkflowRunsTotal.WithLabelValues("completed").Inc()
+		slog.InfoContext(ctx, "run completed", "run_id", runID)
 		p.publishEvent(ctx, runID, model.EventRunCompleted, map[string]interface{}{
 			"status": "completed",
 		})
@@ -277,7 +295,7 @@ func (p *Pool) handleStepFailure(ctx context.Context, workflowID, runID string, 
 		`SELECT retry_policy FROM workflows WHERE id = $1`, workflowID,
 	).Scan(&retryPolicyRaw)
 	if err != nil {
-		log.Printf("Worker: failed to fetch retry policy for workflow %s: %v", workflowID, err)
+		slog.ErrorContext(ctx, "failed to fetch retry policy", "workflow_id", workflowID, "error", err)
 		p.markRunFailed(ctx, runID, errMsg)
 		return
 	}
@@ -285,7 +303,7 @@ func (p *Pool) handleStepFailure(ctx context.Context, workflowID, runID string, 
 	var policy model.RetryPolicy
 	if retryPolicyRaw != nil {
 		if err := json.Unmarshal(retryPolicyRaw, &policy); err != nil {
-			log.Printf("Worker: failed to parse retry policy: %v", err)
+			slog.ErrorContext(ctx, "failed to parse retry policy", "error", err)
 			p.markRunFailed(ctx, runID, errMsg)
 			return
 		}
@@ -301,8 +319,13 @@ func (p *Pool) handleStepFailure(ctx context.Context, workflowID, runID string, 
 	// Compute exponential backoff delay
 	delayMs := CalculateBackoffDelay(policy, attemptNumber)
 
-	log.Printf("Worker: step %d attempt %d failed for run %s, retrying in %dms (attempt %d)",
-		stepIndex, attemptNumber, runID, delayMs, attemptNumber+1)
+	slog.InfoContext(ctx, "retrying step",
+		"run_id", runID,
+		"step_index", stepIndex,
+		"attempt", attemptNumber,
+		"next_attempt", attemptNumber+1,
+		"delay_ms", delayMs,
+	)
 
 	// Context-aware sleep
 	select {
@@ -314,11 +337,12 @@ func (p *Pool) handleStepFailure(ctx context.Context, workflowID, runID string, 
 	// Re-check run status after backoff — may have been cancelled
 	var currentStatus string
 	if err := p.db.QueryRow(ctx, `SELECT status FROM workflow_runs WHERE id = $1`, runID).Scan(&currentStatus); err != nil {
-		log.Printf("Worker: failed to re-check run status %s: %v", runID, err)
+		slog.ErrorContext(ctx, "failed to re-check run status", "run_id", runID, "error", err)
 		return
 	}
 	if currentStatus != "pending" && currentStatus != "running" {
-		log.Printf("Worker: run %s status changed to %s during backoff, skipping retry", runID, currentStatus)
+		slog.InfoContext(ctx, "run status changed during backoff, skipping retry",
+			"run_id", runID, "status", currentStatus)
 		return
 	}
 
@@ -360,7 +384,7 @@ func (p *Pool) doRecovery(ctx context.Context) {
 		Count:  100,
 	}).Result()
 	if err != nil {
-		log.Printf("Recovery: XPENDING error: %v", err)
+		slog.ErrorContext(ctx, "XPENDING error during recovery", "error", err)
 		return
 	}
 
@@ -371,7 +395,7 @@ func (p *Pool) doRecovery(ctx context.Context) {
 			continue
 		}
 
-		log.Printf("Recovery: claiming orphaned message %s (idle %s)", msg.ID, msg.Idle)
+		slog.InfoContext(ctx, "claiming orphaned message", "msg_id", msg.ID, "idle", msg.Idle)
 
 		claimed, err := p.rdb.XClaim(ctx, &redis.XClaimArgs{
 			Stream:   streamName,
@@ -381,7 +405,7 @@ func (p *Pool) doRecovery(ctx context.Context) {
 			Messages: []string{msg.ID},
 		}).Result()
 		if err != nil {
-			log.Printf("Recovery: XCLAIM error for %s: %v", msg.ID, err)
+			slog.ErrorContext(ctx, "XCLAIM error", "msg_id", msg.ID, "error", err)
 			continue
 		}
 
@@ -394,17 +418,16 @@ func (p *Pool) doRecovery(ctx context.Context) {
 				`SELECT EXISTS(SELECT 1 FROM step_executions WHERE attempt_id = $1)`, attemptID,
 			).Scan(&exists)
 			if err != nil {
-				log.Printf("Recovery: idempotency check error for attempt %s: %v", attemptID, err)
+				slog.ErrorContext(ctx, "idempotency check error", "attempt_id", attemptID, "error", err)
 				continue
 			}
 
 			if exists {
 				// Already processed — just ACK
 				p.ack(ctx, claimedMsg.ID)
-				log.Printf("Recovery: message %s already processed (attempt %s), ACKed", claimedMsg.ID, attemptID)
+				slog.InfoContext(ctx, "message already processed, ACKed", "msg_id", claimedMsg.ID, "attempt_id", attemptID)
 			} else {
-				// Reprocess
-				log.Printf("Recovery: reprocessing message %s", claimedMsg.ID)
+				slog.InfoContext(ctx, "reprocessing message", "msg_id", claimedMsg.ID)
 				p.processMessage(ctx, claimedMsg)
 			}
 		}
@@ -412,13 +435,14 @@ func (p *Pool) doRecovery(ctx context.Context) {
 }
 
 func (p *Pool) markRunFailed(ctx context.Context, runID, errMsg string) {
+	p.metrics.WorkflowRunsTotal.WithLabelValues("failed").Inc()
 	now := time.Now().UTC()
 	_, err := p.db.Exec(ctx,
 		`UPDATE workflow_runs SET status = 'failed', error_message = $2, completed_at = $3 WHERE id = $1`,
 		runID, errMsg, now,
 	)
 	if err != nil {
-		log.Printf("Worker: failed to mark run %s as failed: %v", runID, err)
+		slog.ErrorContext(ctx, "failed to mark run as failed", "run_id", runID, "error", err)
 	}
 	p.publishEvent(ctx, runID, model.EventRunFailed, map[string]interface{}{
 		"status": "failed", "error": errMsg,
@@ -432,7 +456,7 @@ func (p *Pool) ack(ctx context.Context, msgID string) {
 func (p *Pool) publishEvent(ctx context.Context, runID string, eventType string, data interface{}) {
 	jsonData, err := json.Marshal(data)
 	if err != nil {
-		log.Printf("Worker: failed to marshal event data: %v", err)
+		slog.ErrorContext(ctx, "failed to marshal event data", "error", err)
 		return
 	}
 	event := model.WSEvent{
@@ -441,6 +465,6 @@ func (p *Pool) publishEvent(ctx context.Context, runID string, eventType string,
 		Data:  jsonData,
 	}
 	if err := ws.PublishEvent(ctx, p.rdb, runID, event); err != nil {
-		log.Printf("Worker: failed to publish event: %v", err)
+		slog.ErrorContext(ctx, "failed to publish event", "run_id", runID, "error", err)
 	}
 }

@@ -16,6 +16,9 @@ type Config struct {
 	JWTSecret                 string
 	AccessTokenTTL            time.Duration
 	RefreshTokenTTL           time.Duration
+	LogLevel                  string
+	OTelEnabled               bool
+	OTelEndpoint              string
 }
 
 func Load() Config {
@@ -29,6 +32,9 @@ func Load() Config {
 		JWTSecret:                 getEnv("JWT_SECRET", "dev-secret-change-me-in-prod"),
 		AccessTokenTTL:            getEnvDuration("ACCESS_TOKEN_TTL", 15*time.Minute),
 		RefreshTokenTTL:           getEnvDuration("REFRESH_TOKEN_TTL", 720*time.Hour),
+		LogLevel:                  getEnv("LOG_LEVEL", "info"),
+		OTelEnabled:               getEnvBool("OTEL_ENABLED", false),
+		OTelEndpoint:              getEnv("OTEL_EXPORTER_OTLP_ENDPOINT", "localhost:4317"),
 	}
 }
 
@@ -44,6 +50,13 @@ func getEnvInt(key string, fallback int) int {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
 		}
+	}
+	return fallback
+}
+
+func getEnvBool(key string, fallback bool) bool {
+	if v := os.Getenv(key); v != "" {
+		return v == "true" || v == "1"
 	}
 	return fallback
 }
