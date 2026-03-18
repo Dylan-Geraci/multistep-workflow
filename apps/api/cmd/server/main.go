@@ -15,6 +15,7 @@ import (
 	"github.com/dylangeraci/flowforge/internal/logging"
 	"github.com/dylangeraci/flowforge/internal/metrics"
 	"github.com/dylangeraci/flowforge/internal/router"
+	"github.com/dylangeraci/flowforge/internal/tracing"
 	"github.com/dylangeraci/flowforge/internal/worker"
 	"github.com/dylangeraci/flowforge/internal/ws"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -68,6 +69,21 @@ func main() {
 	// Initialize metrics
 	m := metrics.New()
 	go metrics.StartCollector(ctx, rdb, m)
+
+	// Initialize tracing
+	if cfg.OTelEnabled {
+		shutdown, err := tracing.Init(ctx, "flowforge-api", cfg.OTelEndpoint)
+		if err != nil {
+			slog.Error("failed to initialize tracing", "error", err)
+			os.Exit(1)
+		}
+		defer func() {
+			if err := shutdown(context.Background()); err != nil {
+				slog.Error("failed to shutdown tracing", "error", err)
+			}
+		}()
+		slog.Info("tracing initialized", "endpoint", cfg.OTelEndpoint)
+	}
 
 	// Start WebSocket hub
 	hub := ws.NewHub(rdb, m)

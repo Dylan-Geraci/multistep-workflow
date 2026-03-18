@@ -1,6 +1,8 @@
 package router
 
 import (
+	"net/http"
+
 	"github.com/dylangeraci/flowforge/internal/config"
 	"github.com/dylangeraci/flowforge/internal/handler"
 	"github.com/dylangeraci/flowforge/internal/metrics"
@@ -11,10 +13,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 func New(db *pgxpool.Pool, rdb *redis.Client, cfg config.Config, hub *ws.Hub, m *metrics.Metrics) *chi.Mux {
 	r := chi.NewRouter()
+	r.Use(func(next http.Handler) http.Handler {
+		return otelhttp.NewHandler(next, "flowforge-api")
+	})
 	r.Use(authmw.RequestID)
 	r.Use(authmw.HTTPMetrics(m))
 	r.Use(middleware.Logger)

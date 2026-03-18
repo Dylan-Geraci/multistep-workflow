@@ -16,6 +16,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/oklog/ulid/v2"
 	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const streamName = "flowforge:steps"
@@ -132,6 +136,23 @@ func (p *Pool) processMessage(ctx context.Context, msg redis.XMessage) {
 		fmt.Sscanf(attemptNumberStr, "%d", &attemptNumber)
 	}
 
+	// Extract trace context propagated through Redis
+	carrier := propagation.MapCarrier{}
+	if tp, ok := msg.Values["traceparent"].(string); ok {
+		carrier.Set("traceparent", tp)
+	}
+	ctx = otel.GetTextMapPropagator().Extract(ctx, carrier)
+
+	tracer := otel.Tracer("flowforge")
+	ctx, runSpan := tracer.Start(ctx, "workflow.run",
+		trace.WithAttributes(
+			attribute.String("run.id", runID),
+			attribute.Int("step.index", stepIndex),
+			attribute.Int("step.attempt", attemptNumber),
+		),
+	)
+	defer runSpan.End()
+
 	log := slog.With("run_id", runID, "step_index", stepIndex, "attempt", attemptNumber)
 
 	// Fetch run status — skip if not pending/running
@@ -195,7 +216,16 @@ func (p *Pool) processMessage(ctx context.Context, msg redis.XMessage) {
 	p.publishEvent(ctx, runID, model.EventStepStarted, map[string]interface{}{
 		"step_index": stepIndex, "action": action, "attempt_number": attemptNumber,
 	})
-	output, execErr := ExecuteAction(ctx, action, stepConfig, runContext)
+
+	stepCtx, stepSpan := tracer.Start(ctx, "step.execute",
+		trace.WithAttributes(
+			attribute.String("step.action", action),
+			attribute.Int("step.index", stepIndex),
+		),
+	)
+	output, execErr := ExecuteAction(stepCtx, action, stepConfig, runContext)
+	stepSpan.End()
+
 	completedAt := time.Now().UTC()
 	durationMs := int(completedAt.Sub(startedAt).Milliseconds())
 
@@ -259,16 +289,24 @@ func (p *Pool) processMessage(ctx context.Context, msg redis.XMessage) {
 
 	nextStep := stepIndex + 1
 	if nextStep < totalSteps {
-		// XADD next step
+		// XADD next step with trace context
 		nextAttemptID := newULID()
+		nextValues := map[string]interface{}{
+			"run_id":         runID,
+			"step_index":     fmt.Sprintf("%d", nextStep),
+			"attempt_id":     nextAttemptID,
+			"attempt_number": "1",
+		}
+		nextCarrier := propagation.MapCarrier{}
+		otel.GetTextMapPropagator().Inject(ctx, nextCarrier)
+		for _, key := range []string{"traceparent"} {
+			if v := nextCarrier.Get(key); v != "" {
+				nextValues[key] = v
+			}
+		}
 		p.rdb.XAdd(ctx, &redis.XAddArgs{
 			Stream: streamName,
-			Values: map[string]interface{}{
-				"run_id":         runID,
-				"step_index":     fmt.Sprintf("%d", nextStep),
-				"attempt_id":     nextAttemptID,
-				"attempt_number": "1",
-			},
+			Values: nextValues,
 		})
 	} else {
 		// Last step — mark run completed
@@ -346,16 +384,22 @@ func (p *Pool) handleStepFailure(ctx context.Context, workflowID, runID string, 
 		return
 	}
 
-	// XADD retry with incremented attempt number
+	// XADD retry with incremented attempt number and trace context
 	nextAttemptID := newULID()
+	retryValues := map[string]interface{}{
+		"run_id":         runID,
+		"step_index":     fmt.Sprintf("%d", stepIndex),
+		"attempt_id":     nextAttemptID,
+		"attempt_number": fmt.Sprintf("%d", attemptNumber+1),
+	}
+	retryCarrier := propagation.MapCarrier{}
+	otel.GetTextMapPropagator().Inject(ctx, retryCarrier)
+	if v := retryCarrier.Get("traceparent"); v != "" {
+		retryValues["traceparent"] = v
+	}
 	p.rdb.XAdd(ctx, &redis.XAddArgs{
 		Stream: streamName,
-		Values: map[string]interface{}{
-			"run_id":         runID,
-			"step_index":     fmt.Sprintf("%d", stepIndex),
-			"attempt_id":     nextAttemptID,
-			"attempt_number": fmt.Sprintf("%d", attemptNumber+1),
-		},
+		Values: retryValues,
 	})
 }
 

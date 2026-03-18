@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 type httpCallConfig struct {
@@ -52,7 +54,8 @@ func executeHTTPCall(ctx context.Context, config json.RawMessage, _ json.RawMess
 		req.Header.Set(k, v)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{Transport: otelhttp.NewTransport(http.DefaultTransport)}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dylangeraci/flowforge/internal/metrics"
 	"github.com/dylangeraci/flowforge/internal/model"
 	"github.com/gorilla/websocket"
 )

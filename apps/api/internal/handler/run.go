@@ -13,6 +13,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 )
 
 const streamName = "flowforge:steps"
@@ -78,16 +80,22 @@ func (h *RunHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// XADD first step to Redis stream
+	// XADD first step to Redis stream with trace context
 	attemptID := newULID()
+	xaddValues := map[string]interface{}{
+		"run_id":         runID,
+		"step_index":     "0",
+		"attempt_id":     attemptID,
+		"attempt_number": "1",
+	}
+	carrier := propagation.MapCarrier{}
+	otel.GetTextMapPropagator().Inject(r.Context(), carrier)
+	if v := carrier.Get("traceparent"); v != "" {
+		xaddValues["traceparent"] = v
+	}
 	err = h.rdb.XAdd(r.Context(), &redis.XAddArgs{
 		Stream: streamName,
-		Values: map[string]interface{}{
-			"run_id":         runID,
-			"step_index":     "0",
-			"attempt_id":     attemptID,
-			"attempt_number": "1",
-		},
+		Values: xaddValues,
 	}).Err()
 	if err != nil {
 		model.WriteError(w, http.StatusInternalServerError, "INTERNAL", "Failed to enqueue step")
